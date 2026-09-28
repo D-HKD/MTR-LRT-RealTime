@@ -1,6 +1,6 @@
 from flask import Flask, render_template_string, request
 from workers import wsgi
-from js import fetch
+import pyodide.http
 
 app = Flask(__name__)
 
@@ -21,10 +21,10 @@ ALL_STATIONS = LR_STATIONS + TML_STATIONS
 
 async def fetch_json(url, params=None):
     if params:
-        qs = "&".join([f"{k}={v}" for k, v in params.items()])
-        url = f"{url}?{qs}"
-    res = await fetch(url)
-    return await res.json()
+        query = "&".join([f"{k}={v}" for k,v in params.items()])
+        url = f"{url}?{query}"
+    resp = await pyodide.http.pyfetch(url)
+    return await resp.json()
 
 async def get_lr_data(station_id):
     try:
