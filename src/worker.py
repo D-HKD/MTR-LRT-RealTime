@@ -8,7 +8,6 @@ LR_STATIONS = [
     {"name": "輕鐵｜豐年路站", "type": "lr", "id": 1044},
     {"name": "輕鐵｜元朗站", "type": "lr", "id": 1045},
 ]
-
 TML_STATIONS = [
     {"name": "屯馬綫｜屯門站", "type": "tml", "code": "TUM"},
     {"name": "屯馬綫｜天水圍站", "type": "tml", "code": "TIS"},
@@ -17,19 +16,23 @@ TML_STATIONS = [
 ]
 ALL_STATIONS = LR_STATIONS + TML_STATIONS
 
-
-async def fetch_json(url, params=None):
-    if params:
-        qs = "&".join([f"{k}={v}" for k, v in params.items()])
-        url = f"{url}?{qs}"
-    resp = await fetch(url)
+import json
+async def fetch_json_post(url, payload):
+    """改用POST JSON傳參數，配合正確Header"""
+    resp = await fetch(url, {
+        "method": "POST",
+        "headers": {
+            "Content-Type": "application/json",
+            "User-Agent": "MTR-ETA-CloudflareWorker/1.0"
+        },
+        "body": json.dumps(payload)
+    })
     return await resp.json()
-
 
 async def get_lr_data(station_id):
     try:
         payload = {"station_id": station_id, "with_special": 0}
-        j = await fetch_json("https://rt.data.gov.hk/v1/transport/mtr/lrt/getSchedule", payload)
+        j = await fetch_json_post("https://rt.data.gov.hk/v1/transport/mtr/lrt/getSchedule", payload)
     except Exception:
         return [], "連線失敗"
     if j.get("status") != 1:
@@ -47,11 +50,10 @@ async def get_lr_data(station_id):
             })
     return trains, j["system_time"]
 
-
 async def get_tml_data(sta_code):
     try:
         payload = {"line": "TML", "sta": sta_code, "lang": "zh"}
-        j = await fetch_json("https://rt.data.gov.hk/v1/transport/mtr/getSchedule.php", payload)
+        j = await fetch_json_post("https://rt.data.gov.hk/v1/transport/mtr/getSchedule.php", payload)
     except Exception:
         return [], "連線失敗"
     key = f"TML-{sta_code}"
@@ -69,7 +71,6 @@ async def get_tml_data(sta_code):
                 "direction": dir_name
             })
     return trains, data["sys_time"]
-
 
 HTML_TPL = '''
 <!DOCTYPE html>
@@ -131,7 +132,6 @@ class Default(WorkerEntrypoint):
         params = parse_qs(parsed_url.query)
         sel_idx = int(params.get("station", ["0"])[0])
         filter_dir = params.get("filter_dir", ["all"])[0]
-
         station = ALL_STATIONS[sel_idx]
         train_list = []
         sys_time = ""
