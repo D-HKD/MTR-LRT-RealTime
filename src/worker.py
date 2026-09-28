@@ -1,4 +1,5 @@
-from cloudflare import fetch
+from workers import WorkerEntrypoint, Response, fetch
+from urllib.parse import urlparse, parse_qs
 
 # 車站列表
 LR_STATIONS = [
@@ -108,127 +109,107 @@ select{width:100%;padding:14px;font-size:18px;border:1px solid #d0d7e3;border-ra
     <div class="select-container">
         <form method="GET">
             <select name="station" onchange="this.form.submit()">
-                {% for idx, s in stations %}
-                <option value="{{idx}}" {% if sel_idx == idx %}selected{% endif %}>{{s.name}}</option>
-                {% endfor %}
+                {{station_options}}
             </select>
             <select name="filter_dir" onchange="this.form.submit()">
-                <option value="all" {% if filter_dir == "all" %}selected{% endif %}>全部方向</option>
-                <option value="往屯門" {% if filter_dir == "往屯門" %}selected{% endif %}>往屯門</option>
-                <option value="往烏溪沙" {% if filter_dir == "往烏溪沙" %}selected{% endif %}>往烏溪沙</option>
-                <option value="往元朗" {% if filter_dir == "往元朗" %}selected{% endif %}>往元朗</option>
-                <option value="往天水圍" {% if filter_dir == "往天水圍" %}selected{% endif %}>往天水圍</option>
+                <option value="all" {{sel_all}}>全部方向</option>
+                <option value="往屯門" {{sel_tuenmun}}>往屯門</option>
+                <option value="往烏溪沙" {{sel_wukisha}}>往烏溪沙</option>
+                <option value="往元朗" {{sel_yuenlong}}>往元朗</option>
+                <option value="往天水圍" {{sel_tinshuiwai}}>往天水圍</option>
             </select>
         </form>
     </div>
-{% if train_list %}
-    <div class="train-card">
-        <span class="line-tag {% if station_type == 'lr' %}tag-lr{% else %}tag-tml{% endif %}">{{station_name}}</span>
-        <div class="update-time">更新時間：{{sys_time}}</div>
-        {% for t in train_list %}
-            {% if filter_dir == "all" or filter_dir in t.direction %}
-            <div class="train-item {% if t.min <=5 %}urgent{% endif %}">
-                <div class="info-left">
-                    {% if t.type == "lr" %}
-                    <span class="lr-circle">{{t.route}}</span>月台{{t.plat}}｜往{{t.dest}}（{{t.length}}卡）
-                    {% else %}
-                    屯馬綫｜{{t.dir}}｜月台{{t.plat}}｜{{t.dest}}
-                    {% endif %}
-                    {% if t.min <=5 %}<span class="soon-badge">即將到站</span>{% endif %}
-                </div>
-                <div class="info-right">{{t.time}} 分鐘</div>
-            </div>
-            {% endif %}
-        {% endfor %}
-    </div>
-{% else %}
-    <div class="train-card"><div class="update-time">暫時未能取得列車資料，請稍後再試</div></div>
-{% endif %}
+{{train_content}}
 </body>
 </html>
 '''
 
-# 原生Worker handler
-async def on_fetch(request):
-    url = request.url
-    params = url.search_params
-    sel_idx = int(params.get("station", "0"))
-    filter_dir = params.get("filter_dir", "all")
+class Default(WorkerEntrypoint):
+    async def fetch(self, request):
+        parsed_url = urlparse(request.url)
+        params = parse_qs(parsed_url.query)
+        sel_idx = int(params.get("station", ["0"])[0])
+        filter_dir = params.get("filter_dir", ["all"])[0]
 
-    station = ALL_STATIONS[sel_idx]
-    train_list = []
-    sys_time = ""
-    station_type = station["type"]
+        station = ALL_STATIONS[sel_idx]
+        train_list = []
+        sys_time = ""
+        station_type = station["type"]
 
-    if station["type"] == "lr":
-        trains, sys_time = await get_lr_data(station["id"])
-        for t in trains:
-            try:
-                mins = int(t["time"])
-            except:
-                mins = 99
-            train_list.append({
-                "type": "lr",
-                "plat": t["plat"],
-                "route": t["route"],
-                "dest": t["dest"],
-                "time": t["time"],
-                "min": mins,
-                "length": t["length"],
-                "direction": t["direction"]
-            })
-    else:
-        trains, sys_time = await get_tml_data(station["code"])
-        for t in trains:
-            try:
-                mins = int(t["time"])
-            except:
-                mins = 99
-            train_list.append({
-                "type": "tml",
-                "dir": t["dir"],
-                "plat": t["plat"],
-                "dest": t["dest"],
-                "time": t["time"],
-                "min": mins,
-                "direction": t["direction"]
-            })
-
-    # 簡單模板渲染（手動替代Jinja，Cloudflare Python Worker唔支援Jinja）
-    station_name = station["name"]
-    html_out = HTML_TPL
-    html_out = html_out.replace("{{sel_idx}}", str(sel_idx))
-    html_out = html_out.replace("{{filter_dir}}", filter_dir)
-    html_out = html_out.replace("{{station_name}}", station_name)
-    html_out = html_out.replace("{{station_type}}", station_type)
-    html_out = html_out.replace("{{sys_time}}", sys_time)
-
-    station_options = ""
-    for idx, s in enumerate(ALL_STATIONS):
-        selected = "selected" if int(sel_idx) == idx else ""
-        station_options += f'<option value="{idx}" {selected}>{s.name}</option>'
-    html_out = html_out.replace("{% for idx, s in stations %}", "").replace("{% endfor %}", "")
-    html_out = html_out.replace("{{idx}}", str(sel_idx)).replace("{{s.name}}", station["name"])
-    html_out = html_out.replace("<select name=\"station\" onchange=\"this.form.submit()\">", f"<select name=\"station\" onchange=\"this.form.submit()\">{station_options}")
-
-    train_html = ""
-    for t in train_list:
-        if not (filter_dir == "all" or filter_dir in t["direction"]):
-            continue
-        urgent = "urgent" if t["min"] <= 5 else ""
-        soon_badge = '<span class="soon-badge">即將到站</span>' if t["min"] <=5 else ""
-        if t["type"] == "lr":
-            left = f'<span class="lr-circle">{t["route"]}</span>月台{t["plat"]}｜往{t["dest"]}（{t["length"]}卡）{soon_badge}'
+        if station["type"] == "lr":
+            trains, sys_time = await get_lr_data(station["id"])
+            for t in trains:
+                try:
+                    mins = int(t["time"])
+                except:
+                    mins = 99
+                train_list.append({
+                    "type": "lr",
+                    "plat": t["plat"],
+                    "route": t["route"],
+                    "dest": t["dest"],
+                    "time": t["time"],
+                    "min": mins,
+                    "length": t["length"],
+                    "direction": t["direction"]
+                })
         else:
-            left = f'屯馬綫｜{t["dir"]}｜月台{t["plat"]}｜{t["dest"]}{soon_badge}'
-        right = f'{t["time"]} 分鐘'
-        train_html += f'<div class="train-item {urgent}"><div class="info-left">{left}</div><div class="info-right">{right}</div></div>'
+            trains, sys_time = await get_tml_data(station["code"])
+            for t in trains:
+                try:
+                    mins = int(t["time"])
+                except:
+                    mins = 99
+                train_list.append({
+                    "type": "tml",
+                    "dir": t["dir"],
+                    "plat": t["plat"],
+                    "dest": t["dest"],
+                    "time": t["time"],
+                    "min": mins,
+                    "direction": t["direction"]
+                })
 
-    html_out = html_out.replace("{% for t in train_list %}", "").replace("{% endif %}", "").replace("{% endfor %}", "")
-    if train_html:
-        html_out = html_out.replace('<div class="train-card"><span class="line-tag', f'<div class="train-card"><span class="line-tag').replace('</div>{% if train_list %}', '</div>')
-        html_out = html_out.replace('</div>{% else %}', train_html + '</div>')
-    else:
-        html_out = html_out.replace("{% if train_list %}", "").replace("{% else %}", "").replace("{% endif %}", "")
+        # 組合車站下拉選項
+        station_options = ""
+        for idx, s in enumerate(ALL_STATIONS):
+            selected = "selected" if int(sel_idx) == idx else ""
+            station_options += f'<option value="{idx}" {selected}>{s["name"]}</option>'
 
-    return Response(html_out, headers={"content-type": "text/html;charset=utf-8"})
+        # 方向下拉 selected
+        sel_all = "selected" if filter_dir == "all" else ""
+        sel_tuenmun = "selected" if filter_dir == "往屯門" else ""
+        sel_wukisha = "selected" if filter_dir == "往烏溪沙" else ""
+        sel_yuenlong = "selected" if filter_dir == "往元朗" else ""
+        sel_tinshuiwai = "selected" if filter_dir == "往天水圍" else ""
+
+        # 組合列車HTML
+        train_content = ""
+        if train_list:
+            train_content += f'<div class="train-card"><span class="line-tag {"tag-lr" if station_type=="lr" else "tag-tml"}">{station["name"]}</span><div class="update-time">更新時間：{sys_time}</div>'
+            for t in train_list:
+                if not (filter_dir == "all" or filter_dir in t["direction"]):
+                    continue
+                urgent = "urgent" if t["min"] <= 5 else ""
+                soon_badge = '<span class="soon-badge">即將到站</span>' if t["min"] <=5 else ""
+                if t["type"] == "lr":
+                    left = f'<span class="lr-circle">{t["route"]}</span>月台{t["plat"]}｜往{t["dest"]}（{t["length"]}卡）{soon_badge}'
+                else:
+                    left = f'屯馬綫｜{t["dir"]}｜月台{t["plat"]}｜{t["dest"]}{soon_badge}'
+                right = f'{t["time"]} 分鐘'
+                train_content += f'<div class="train-item {urgent}"><div class="info-left">{left}</div><div class="info-right">{right}</div></div>'
+            train_content += "</div>"
+        else:
+            train_content = '<div class="train-card"><div class="update-time">暫時未能取得列車資料，請稍後再試</div></div>'
+
+        html_out = HTML_TPL
+        html_out = html_out.replace("{{station_options}}", station_options)
+        html_out = html_out.replace("{{sel_all}}", sel_all)
+        html_out = html_out.replace("{{sel_tuenmun}}", sel_tuenmun)
+        html_out = html_out.replace("{{sel_wukisha}}", sel_wukisha)
+        html_out = html_out.replace("{{sel_yuenlong}}", sel_yuenlong)
+        html_out = html_out.replace("{{sel_tinshuiwai}}", sel_tinshuiwai)
+        html_out = html_out.replace("{{train_content}}", train_content)
+
+        return Response(html_out, headers={"content-type": "text/html;charset=utf-8"})
