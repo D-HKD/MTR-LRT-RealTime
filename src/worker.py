@@ -1,9 +1,6 @@
-from flask import Flask, render_template_string, request
-from workers import wsgi
-import pyodide.http
+from cloudflare import fetch
 
-app = Flask(__name__)
-
+# 車站列表
 LR_STATIONS = [
     {"name": "輕鐵｜天水圍站", "type": "lr", "id": 1027},
     {"name": "輕鐵｜天榮站", "type": "lr", "id": 1017},
@@ -19,45 +16,50 @@ TML_STATIONS = [
 ]
 ALL_STATIONS = LR_STATIONS + TML_STATIONS
 
+
 async def fetch_json(url, params=None):
     if params:
-        query = "&".join([f"{k}={v}" for k,v in params.items()])
-        url = f"{url}?{query}"
-    resp = await pyodide.http.pyfetch(url)
+        qs = "&".join([f"{k}={v}" for k, v in params.items()])
+        url = f"{url}?{qs}"
+    resp = await fetch(url)
     return await resp.json()
+
 
 async def get_lr_data(station_id):
     try:
-        j = await fetch_json("https://rt.data.gov.hk/v1/transport/mtr/lrt/getSchedule", {"station_id": station_id, "with_special":0})
+        payload = {"station_id": station_id, "with_special": 0}
+        j = await fetch_json("https://rt.data.gov.hk/v1/transport/mtr/lrt/getSchedule", payload)
     except Exception:
-        return None, "連線失敗"
+        return [], "連線失敗"
     if j.get("status") != 1:
-        return None, "API返回錯誤"
+        return [], "API返回錯誤"
     trains = []
     for plat in j["platform_list"]:
-        for t in plat["route_list"]:
+        for route in plat["route_list"]:
             trains.append({
                 "plat": plat["platform_id"],
-                "route": t["route_no"],
-                "dest": t["dest_ch"],
-                "time": t["time"],
-                "length": t["train_length"],
-                "direction": t["dest_ch"]
+                "route": route["route_no"],
+                "dest": route["dest_ch"],
+                "time": route["time"],
+                "length": route["train_length"],
+                "direction": route["dest_ch"]
             })
     return trains, j["system_time"]
 
+
 async def get_tml_data(sta_code):
     try:
-        j = await fetch_json("https://rt.data.gov.hk/v1/transport/mtr/getSchedule.php", {"line":"TML","sta":sta_code,"lang":"zh"})
+        payload = {"line": "TML", "sta": sta_code, "lang": "zh"}
+        j = await fetch_json("https://rt.data.gov.hk/v1/transport/mtr/getSchedule.php", payload)
     except Exception:
-        return None, "連線失敗"
+        return [], "連線失敗"
     key = f"TML-{sta_code}"
-    if key not in j.get("data",{}):
-        return None, j.get("sys_time","")
+    if key not in j.get("data", {}):
+        return [], j.get("sys_time", "")
     data = j["data"][key]
     trains = []
-    for direction, dir_name in [("UP","往屯門"),("DOWN","往烏溪沙")]:
-        for t in data.get(direction,[]):
+    for direction, dir_name in [("UP", "往屯門"), ("DOWN", "往烏溪沙")]:
+        for t in data.get(direction, []):
             trains.append({
                 "dir": dir_name,
                 "plat": t["plat"],
@@ -65,7 +67,8 @@ async def get_tml_data(sta_code):
                 "time": t["ttnt"],
                 "direction": dir_name
             })
-    return trains, data["curr_time"]
+    return trains, data["sys_time"]
+
 
 HTML_TPL = '''
 <!DOCTYPE html>
@@ -105,8 +108,8 @@ select{width:100%;padding:14px;font-size:18px;border:1px solid #d0d7e3;border-ra
     <div class="select-container">
         <form method="GET">
             <select name="station" onchange="this.form.submit()">
-                {% for s in stations %}
-                <option value="{{loop.index0}}" {% if sel_idx == loop.index0 %}selected{% endif %}>{{s.name}}</option>
+                {% for idx, s in stations %}
+                <option value="{{idx}}" {% if sel_idx == idx %}selected{% endif %}>{{s.name}}</option>
                 {% endfor %}
             </select>
             <select name="filter_dir" onchange="this.form.submit()">
@@ -145,10 +148,13 @@ select{width:100%;padding:14px;font-size:18px;border:1px solid #d0d7e3;border-ra
 </html>
 '''
 
-@app.route('/')
-async def index():
-    sel_idx = int(request.args.get("station",0))
-    filter_dir = request.args.get("filter_dir", "all")
+# 原生Worker handler
+async def on_fetch(request):
+    url = request.url
+    params = url.search_params
+    sel_idx = int(params.get("station", "0"))
+    filter_dir = params.get("filter_dir", "all")
+
     station = ALL_STATIONS[sel_idx]
     train_list = []
     sys_time = ""
@@ -156,47 +162,73 @@ async def index():
 
     if station["type"] == "lr":
         trains, sys_time = await get_lr_data(station["id"])
-        if trains:
-            for t in trains:
-                try:
-                    mins = int(t["time"])
-                except:
-                    mins = 99
-                train_list.append({
-                    "type":"lr",
-                    "plat":t["plat"],
-                    "route":t["route"],
-                    "dest":t["dest"],
-                    "time":t["time"],
-                    "min":mins,
-                    "length":t["length"],
-                    "direction": t["direction"]
-                })
+        for t in trains:
+            try:
+                mins = int(t["time"])
+            except:
+                mins = 99
+            train_list.append({
+                "type": "lr",
+                "plat": t["plat"],
+                "route": t["route"],
+                "dest": t["dest"],
+                "time": t["time"],
+                "min": mins,
+                "length": t["length"],
+                "direction": t["direction"]
+            })
     else:
         trains, sys_time = await get_tml_data(station["code"])
-        if trains:
-            for t in trains:
-                try:
-                    mins = int(t["time"])
-                except:
-                    mins = 99
-                train_list.append({
-                    "type":"tml",
-                    "dir":t["dir"],
-                    "plat":t["plat"],
-                    "dest":t["dest"],
-                    "time":t["time"],
-                    "min":mins,
-                    "direction": t["direction"]
-                })
-    return render_template_string(HTML_TPL,
-        stations=ALL_STATIONS,
-        sel_idx=sel_idx,
-        filter_dir=filter_dir,
-        station_name=station["name"],
-        station_type=station_type,
-        train_list=train_list,
-        sys_time=sys_time
-    )
+        for t in trains:
+            try:
+                mins = int(t["time"])
+            except:
+                mins = 99
+            train_list.append({
+                "type": "tml",
+                "dir": t["dir"],
+                "plat": t["plat"],
+                "dest": t["dest"],
+                "time": t["time"],
+                "min": mins,
+                "direction": t["direction"]
+            })
 
-Default = wsgi.entrypoint(app)
+    # 簡單模板渲染（手動替代Jinja，Cloudflare Python Worker唔支援Jinja）
+    station_name = station["name"]
+    html_out = HTML_TPL
+    html_out = html_out.replace("{{sel_idx}}", str(sel_idx))
+    html_out = html_out.replace("{{filter_dir}}", filter_dir)
+    html_out = html_out.replace("{{station_name}}", station_name)
+    html_out = html_out.replace("{{station_type}}", station_type)
+    html_out = html_out.replace("{{sys_time}}", sys_time)
+
+    station_options = ""
+    for idx, s in enumerate(ALL_STATIONS):
+        selected = "selected" if int(sel_idx) == idx else ""
+        station_options += f'<option value="{idx}" {selected}>{s.name}</option>'
+    html_out = html_out.replace("{% for idx, s in stations %}", "").replace("{% endfor %}", "")
+    html_out = html_out.replace("{{idx}}", str(sel_idx)).replace("{{s.name}}", station["name"])
+    html_out = html_out.replace("<select name=\"station\" onchange=\"this.form.submit()\">", f"<select name=\"station\" onchange=\"this.form.submit()\">{station_options}")
+
+    train_html = ""
+    for t in train_list:
+        if not (filter_dir == "all" or filter_dir in t["direction"]):
+            continue
+        urgent = "urgent" if t["min"] <= 5 else ""
+        soon_badge = '<span class="soon-badge">即將到站</span>' if t["min"] <=5 else ""
+        if t["type"] == "lr":
+            left = f'<span class="lr-circle">{t["route"]}</span>月台{t["plat"]}｜往{t["dest"]}（{t["length"]}卡）{soon_badge}'
+        else:
+            left = f'屯馬綫｜{t["dir"]}｜月台{t["plat"]}｜{t["dest"]}{soon_badge}'
+        right = f'{t["time"]} 分鐘'
+        train_html += f'<div class="train-item {urgent}"><div class="info-left">{left}</div><div class="info-right">{right}</div></div>'
+
+    html_out = html_out.replace("{% for t in train_list %}", "").replace("{% endif %}", "").replace("{% endfor %}", "")
+    if train_html:
+        html_out = html_out.replace('<div class="train-card"><span class="line-tag', f'<div class="train-card"><span class="line-tag').replace('</div>{% if train_list %}', '</div>')
+        html_out = html_out.replace('</div>{% else %}', train_html + '</div>')
+    else:
+        html_out = html_out.replace("{% if train_list %}", "").replace("{% else %}", "").replace("{% endif %}", "")
+
+    return Response(html_out, headers={"content-type": "text/html;charset=utf-8"})
