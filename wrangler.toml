@@ -1,4 +1,5 @@
 name = "mtr-lrt-realtime"
 main = "src/worker.py"
 compatibility_flags = ["python_workers"]
-compatibility_date = "2026-09-01"
+compatibility_date = "2026-01-01"
+disable_python_external_sdk = true
