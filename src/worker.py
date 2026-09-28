@@ -1,5 +1,5 @@
 from workers import WorkerEntrypoint, Response, fetch
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, urlencode
 
 # 車站列表
 LR_STATIONS = [
@@ -16,23 +16,24 @@ TML_STATIONS = [
 ]
 ALL_STATIONS = LR_STATIONS + TML_STATIONS
 
-import json
-async def fetch_json_post(url, payload):
-    """改用POST JSON傳參數，配合正確Header"""
+async def fetch_get_json(base_url, params=None):
+    """GET + Query參數，加上UA Header"""
+    if params:
+        query = urlencode(params)
+        url = f"{base_url}?{query}"
+    else:
+        url = base_url
     resp = await fetch(url, {
-        "method": "POST",
         "headers": {
-            "Content-Type": "application/json",
             "User-Agent": "MTR-ETA-CloudflareWorker/1.0"
-        },
-        "body": json.dumps(payload)
+        }
     })
     return await resp.json()
 
 async def get_lr_data(station_id):
     try:
         payload = {"station_id": station_id, "with_special": 0}
-        j = await fetch_json_post("https://rt.data.gov.hk/v1/transport/mtr/lrt/getSchedule", payload)
+        j = await fetch_get_json("https://rt.data.gov.hk/v1/transport/mtr/lrt/getSchedule", payload)
     except Exception:
         return [], "連線失敗"
     if j.get("status") != 1:
@@ -53,7 +54,7 @@ async def get_lr_data(station_id):
 async def get_tml_data(sta_code):
     try:
         payload = {"line": "TML", "sta": sta_code, "lang": "zh"}
-        j = await fetch_json_post("https://rt.data.gov.hk/v1/transport/mtr/getSchedule.php", payload)
+        j = await fetch_get_json("https://rt.data.gov.hk/v1/transport/mtr/getSchedule.php", payload)
     except Exception:
         return [], "連線失敗"
     key = f"TML-{sta_code}"
